@@ -12,77 +12,47 @@ const locationRoutes = require('./routes/locationRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const feedRoutes = require('./routes/feedRoutes');
 const friendsRoutes = require('./routes/friendsRoutes');
+const tripsRoutes = require('./routes/tripsRoutes');
+const gamificationRoutes = require('./routes/gamificationRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
-// CORS & JSON
 app.use(
   cors({
     origin: CORS_ORIGIN,
     credentials: true
   })
 );
+
 app.use(express.json());
 app.use(morgan('dev'));
 
-// Helfer: SQL-Datei ausführen
-async function runSqlFile(filename, label) {
+// Datenbank-Schema initialisieren (Basis-init.sql; weitere Patches hast du bereits separat ausgeführt)
+async function initDb() {
   try {
-    const sqlPath = path.join(__dirname, 'sql', filename);
-    if (!fs.existsSync(sqlPath)) {
-      console.warn(`SQL-Datei ${filename} nicht gefunden – überspringe.`);
-      return;
+    const sqlPath = path.join(__dirname, 'sql', 'init.sql');
+    if (fs.existsSync(sqlPath)) {
+      const initSql = fs.readFileSync(sqlPath, 'utf8');
+      await pool.query(initSql);
+      console.log('PostgreSQL-Basisschema initialisiert.');
     }
-    const sql = fs.readFileSync(sqlPath, 'utf8');
-    if (!sql.trim()) {
-      console.log(`SQL-Datei ${filename} ist leer – überspringe.`);
-      return;
-    }
-    await pool.query(sql);
-    console.log(`${label} ausgeführt (${filename}).`);
   } catch (err) {
-    // ALTER TABLE / CREATE TABLE können beim zweiten Mal Fehler oder Warnungen werfen
-    console.warn(`Warnung beim Ausführen von ${filename}:`, err.message);
+    console.error('Fehler bei DB-Init:', err);
   }
 }
 
-// DB-Schema initialisieren / migrieren
-async function initDb() {
-  await runSqlFile('init.sql', 'Basisschema');
-  await runSqlFile(
-    '003_add_checkin_message_image.sql',
-    'Checkins um message/image_url erweitert'
-  );
-  await runSqlFile(
-    '004_create_friendships.sql',
-    'Friendships-Tabelle angelegt'
-  );
-  await runSqlFile(
-    '008_extend_users_and_checkins.sql',
-    'User-Profil- und Streak-Felder + Badge-Level'
-  );
-  await runSqlFile(
-    '009_create_trips.sql',
-    'Trips- und Trip-Locations-Tabellen angelegt'
-  );
-  await runSqlFile(
-    '010_create_gamification.sql',
-    'Missions- und Achievements-Tabellen angelegt'
-  );
-}
+initDb();
 
-initDb().catch((err) => {
-  console.error('Fehler bei DB-Init:', err);
-});
-
-// Routen registrieren
+// API-Routen
 app.use('/api/auth', authRoutes);
 app.use('/api', locationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', feedRoutes);
 app.use('/api', friendsRoutes);
+app.use('/api', tripsRoutes);
+app.use('/api', gamificationRoutes);
 
 // Healthcheck
 app.get('/api/health', (req, res) => {

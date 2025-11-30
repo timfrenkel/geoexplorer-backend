@@ -13,11 +13,10 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) *
       Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+      Math.sin(dLon / 2) ** 2;
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
@@ -41,18 +40,17 @@ router.get('/locations', authMiddleware, async (req, res) => {
   }
 });
 
-// Check-in
+// Check-in MIT message + image_url
 router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
   const locationId = parseInt(req.params.id, 10);
-  const { latitude, longitude } = req.body || {};
+  const { latitude, longitude, message, imageUrl } = req.body || {};
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return res
-      .status(400)
-      .json({ message: 'Ungültige Geokoordinaten für Check-in.' });
+    return res.status(400).json({ message: 'Ungültige Geokoordinaten.' });
   }
 
   try {
+    // Location laden
     const locRes = await pool.query(
       `SELECT id, name, latitude, longitude, radius_m
        FROM locations
@@ -61,20 +59,22 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
     );
 
     if (locRes.rowCount === 0) {
-      return res.status(404).json({ message: 'Sehenswürdigkeit nicht gefunden oder nicht aktiv.' });
+      return res.status(404).json({ message: 'Sehenswürdigkeit nicht gefunden.' });
     }
 
     const location = locRes.rows[0];
 
-    const existing = await pool.query(
-      'SELECT id FROM checkins WHERE user_id = $1 AND location_id = $2',
+    // Hat der User hier schon eingecheckt?
+    const exists = await pool.query(
+      'SELECT id FROM checkins WHERE user_id=$1 AND location_id=$2',
       [req.user.id, locationId]
     );
 
-    if (existing.rowCount > 0) {
+    if (exists.rowCount > 0) {
       return res.status(400).json({ message: 'Du hast hier bereits eingecheckt.' });
     }
 
+    // Distanz prüfen
     const distance = getDistanceMeters(
       latitude,
       longitude,
@@ -84,27 +84,28 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
 
     if (distance > location.radius_m) {
       return res.status(400).json({
-        message: `Du bist zu weit entfernt (${Math.round(
-          distance
-        )}m). Erlaubter Radius: ${location.radius_m}m.`
+        message: `Zu weit entfernt (${Math.round(distance)}m). Erlaubter Radius: ${location.radius_m}m.`
       });
     }
 
+    // SPEICHERN
     await pool.query(
-      'INSERT INTO checkins (user_id, location_id) VALUES ($1, $2)',
-      [req.user.id, locationId]
+      `INSERT INTO checkins (user_id, location_id, message, image_url)
+       VALUES ($1, $2, $3, $4)`,
+      [req.user.id, locationId, message || null, imageUrl || null]
     );
 
+    // Punkte zählen
     const totalCheckinsRes = await pool.query(
       'SELECT COUNT(*) AS cnt FROM checkins WHERE user_id = $1',
       [req.user.id]
     );
-    const totalCheckins = parseInt(totalCheckinsRes.rows[0].cnt, 10);
+    const points = parseInt(totalCheckinsRes.rows[0].cnt, 10);
 
     res.json({
       message: `Erfolgreich bei "${location.name}" eingecheckt!`,
       distance,
-      points: totalCheckins
+      points
     });
   } catch (err) {
     console.error('Check-in error:', err);

@@ -1,4 +1,3 @@
-// backend/routes/authRoutes.js
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -102,7 +101,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// /me – Profil & Badges
+// /me – Profil + Badges erweitert
 router.get('/me', authMiddleware, async (req, res) => {
   try {
     const userRes = await pool.query(
@@ -117,7 +116,15 @@ router.get('/me', authMiddleware, async (req, res) => {
     const user = userRes.rows[0];
 
     const checkinsRes = await pool.query(
-      `SELECT c.id, c.created_at, l.id AS location_id, l.name, l.description, l.category
+      `SELECT 
+         c.id,
+         c.created_at,
+         c.message,
+         c.image_url,
+         l.id AS location_id,
+         l.name,
+         l.description,
+         l.category
        FROM checkins c
        JOIN locations l ON c.location_id = l.id
        WHERE c.user_id = $1

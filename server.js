@@ -60,7 +60,12 @@ async function initDb() {
     '004_create_friendships.sql',
     'Friendships-Tabelle angelegt'
   );
+  await runSqlFile(
+    '005_normalize_location_categories.sql',
+    'Location-Kategorien vereinheitlicht'
+  );
 }
+
 
 initDb().catch((err) => {
   console.error('Fehler bei DB-Init:', err);

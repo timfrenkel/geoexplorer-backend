@@ -80,7 +80,7 @@ async function ensureGamificationSchema() {
 }
 
 /**
- * Legt Standard-Achievements und -Missions an, falls sie noch nicht existieren.
+ * Standard-Achievements & Missions anlegen (idempotent).
  */
 async function seedGamificationDefaults() {
   await pool.query(`
@@ -106,8 +106,9 @@ async function seedGamificationDefaults() {
 
 /**
  * GET /api/gamification/overview
- * - Missions (mit Fortschritt)
- * - freigeschaltete Achievements
+ * Missions-Fortschritt wird DIREKT berechnet:
+ * - TOTAL_CHECKINS -> Anzahl Check-ins des Users
+ * - STREAK_DAYS    -> checkin_streak_days
  */
 router.get('/overview', authMiddleware, async (req, res) => {
   const userId = req.user.id;
@@ -116,47 +117,100 @@ router.get('/overview', authMiddleware, async (req, res) => {
     await ensureGamificationSchema();
     await seedGamificationDefaults();
 
-    const missionsRes = await pool.query(
-      `
-      SELECT
-        m.id,
-        m.code,
-        m.name,
-        m.description,
-        m.target_type,
-        m.target_value,
-        COALESCE(um.progress_value, 0) AS progress_value,
-        (um.completed_at IS NOT NULL)  AS is_completed,
-        um.completed_at
-      FROM missions m
-      LEFT JOIN user_missions um
-        ON um.mission_id = m.id
-       AND um.user_id = $1
-      ORDER BY m.id
-      `,
-      [userId]
+    // Basisdaten holen: Missions, Achievements, Check-ins, Streak
+    const [missionsRes, achievementsRes, checkinsRes, userRes, umRes] =
+      await Promise.all([
+        pool.query(
+          `
+          SELECT id, code, name, description, target_type, target_value
+          FROM missions
+          ORDER BY id
+          `
+        ),
+        pool.query(
+          `
+          SELECT
+            a.id,
+            a.code,
+            a.name,
+            a.description,
+            a.icon,
+            ua.unlocked_at
+          FROM achievements a
+          JOIN user_achievements ua
+            ON ua.achievement_id = a.id
+          WHERE ua.user_id = $1
+          ORDER BY ua.unlocked_at DESC
+          `,
+          [userId]
+        ),
+        pool.query(
+          `
+          SELECT COUNT(*) AS cnt
+          FROM checkins
+          WHERE user_id = $1
+          `,
+          [userId]
+        ),
+        pool.query(
+          `
+          SELECT COALESCE(checkin_streak_days, 0) AS streak_days
+          FROM users
+          WHERE id = $1
+          `,
+          [userId]
+        ),
+        pool.query(
+          `
+          SELECT mission_id, completed_at
+          FROM user_missions
+          WHERE user_id = $1
+          `,
+          [userId]
+        )
+      ]);
+
+    const totalCheckins = parseInt(checkinsRes.rows[0]?.cnt || '0', 10);
+    const streakDays = parseInt(
+      userRes.rows[0]?.streak_days || '0',
+      10
     );
 
-    const achievementsRes = await pool.query(
-      `
-      SELECT
-        a.id,
-        a.code,
-        a.name,
-        a.description,
-        a.icon,
-        ua.unlocked_at
-      FROM achievements a
-      JOIN user_achievements ua
-        ON ua.achievement_id = a.id
-      WHERE ua.user_id = $1
-      ORDER BY ua.unlocked_at DESC
-      `,
-      [userId]
-    );
+    const completedByMissionId = new Map();
+    umRes.rows.forEach((row) => {
+      completedByMissionId.set(row.mission_id, row.completed_at);
+    });
+
+    const missionsWithProgress = missionsRes.rows.map((m) => {
+      const goal = m.target_value || 0;
+      let rawProgress = 0;
+
+      if (m.target_type === 'TOTAL_CHECKINS') {
+        rawProgress = totalCheckins;
+      } else if (m.target_type === 'STREAK_DAYS') {
+        rawProgress = streakDays;
+      }
+
+      const progressValue =
+        goal > 0 ? Math.min(rawProgress, goal) : rawProgress;
+      const isCompleted = goal > 0 && progressValue >= goal;
+      const completedAt = completedByMissionId.get(m.id) || null;
+
+      return {
+        id: m.id,
+        code: m.code,
+        name: m.name,
+        description: m.description,
+        target_type: m.target_type,
+        target_value: m.target_value,
+        progress_value: progressValue,
+        is_completed: isCompleted,
+        completed_at: completedAt
+      };
+    });
 
     res.json({
-      missions: missionsRes.rows,
+      missions: missionsWithProgress,
       achievements: achievementsRes.rows
     });
   } catch (err) {

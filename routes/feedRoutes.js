@@ -5,7 +5,6 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
-// Feed: Eigene Check-ins + die von Freunden, die ihren Feed öffentlich haben
 router.get('/feed', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -24,10 +23,10 @@ router.get('/feed', authMiddleware, async (req, res) => {
         u.home_city,
         u.home_country,
 
-        l.id   AS location_id,
-        l.name AS location_name,
-        l.image_url AS location_image,
-        l.category AS location_category
+        l.id          AS location_id,
+        l.name        AS location_name,
+        l.image_url   AS location_image,
+        l.category    AS location_category
 
       FROM checkins c
       JOIN users u ON u.id = c.user_id
@@ -35,14 +34,19 @@ router.get('/feed', authMiddleware, async (req, res) => {
 
       WHERE
         (
+          -- eigene Check-ins
           c.user_id = $1
-          OR c.user_id IN (
-            SELECT friend_id FROM friendships
-            WHERE user_id = $1 AND status = 'accepted'
-          )
-          OR c.user_id IN (
-            SELECT user_id FROM friendships
-            WHERE friend_id = $1 AND status = 'accepted'
+          OR
+          -- Check-ins von Freunden (beide Richtungen in friendships)
+          c.user_id IN (
+            SELECT DISTINCT
+              CASE
+                WHEN f.user_id = $1 THEN f.friend_id
+                ELSE f.user_id
+              END AS friend_id
+            FROM friendships f
+            WHERE (f.user_id = $1 OR f.friend_id = $1)
+              AND f.status = 'accepted'
           )
         )
         AND (

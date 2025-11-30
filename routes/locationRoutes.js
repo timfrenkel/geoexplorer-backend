@@ -16,7 +16,8 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) *
       Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
@@ -97,7 +98,10 @@ async function updateStreak(userId) {
   }
 }
 
-// 🔹 Helper: Missions-Fortschritt nach Check-in updaten
+/**
+ * 🔹 Helper: Missions-Fortschritt nach Check-in updaten
+ * Nutzt PostgreSQL-UPSERT (ON CONFLICT) auf (user_id, mission_id)
+ */
 async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
   try {
     // TOTAL_CHECKINS-Missions
@@ -113,48 +117,21 @@ async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
       const target = m.target_value || 0;
       const progress = Math.min(totalCheckins, target);
 
-      // Upsert user_missions
-      // 1) gibt es schon einen Eintrag?
-      // eslint-disable-next-line no-await-in-loop
-      const umRes = await pool.query(
+      await pool.query(
         `
-        SELECT id, progress_value, completed_at
-        FROM user_missions
-        WHERE user_id = $1 AND mission_id = $2
+        INSERT INTO user_missions (user_id, mission_id, progress_value, completed_at)
+        VALUES ($1, $2, $3, CASE WHEN $3 >= $4 THEN NOW() ELSE NULL END)
+        ON CONFLICT (user_id, mission_id)
+        DO UPDATE SET
+          progress_value = EXCLUDED.progress_value,
+          completed_at = CASE
+            WHEN EXCLUDED.progress_value >= $4 THEN
+              COALESCE(user_missions.completed_at, NOW())
+            ELSE user_missions.completed_at
+          END
         `,
-        [userId, m.id]
+        [userId, m.id, progress, target]
       );
-
-      if (umRes.rowCount === 0) {
-        // neu anlegen
-        // eslint-disable-next-line no-await-in-loop
-        await pool.query(
-          `
-          INSERT INTO user_missions (user_id, mission_id, progress_value, completed_at)
-          VALUES ($1, $2, $3, CASE WHEN $3 >= $4 THEN CURRENT_TIMESTAMP ELSE NULL END)
-          `,
-          [userId, m.id, progress, target]
-        );
-      } else {
-        const row = umRes.rows[0];
-        const alreadyCompleted = row.completed_at != null;
-        const newCompleted =
-          progress >= target && row.completed_at == null;
-
-        // eslint-disable-next-line no-await-in-loop
-        await pool.query(
-          `
-          UPDATE user_missions
-          SET progress_value = $3,
-              completed_at = CASE
-                WHEN $4 = 1 AND completed_at IS NULL THEN CURRENT_TIMESTAMP
-                ELSE completed_at
-              END
-          WHERE id = $1
-          `,
-          [row.id, userId, progress, newCompleted ? 1 : 0]
-        );
-      }
     }
 
     // STREAK_DAYS-Missions
@@ -171,45 +148,21 @@ async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
         const target = m.target_value || 0;
         const progress = Math.min(streakDays, target);
 
-        // eslint-disable-next-line no-await-in-loop
-        const umRes = await pool.query(
+        await pool.query(
           `
-          SELECT id, progress_value, completed_at
-          FROM user_missions
-          WHERE user_id = $1 AND mission_id = $2
+          INSERT INTO user_missions (user_id, mission_id, progress_value, completed_at)
+          VALUES ($1, $2, $3, CASE WHEN $3 >= $4 THEN NOW() ELSE NULL END)
+          ON CONFLICT (user_id, mission_id)
+          DO UPDATE SET
+            progress_value = EXCLUDED.progress_value,
+            completed_at = CASE
+              WHEN EXCLUDED.progress_value >= $4 THEN
+                COALESCE(user_missions.completed_at, NOW())
+              ELSE user_missions.completed_at
+            END
           `,
-          [userId, m.id]
+          [userId, m.id, progress, target]
         );
-
-        if (umRes.rowCount === 0) {
-          // eslint-disable-next-line no-await-in-loop
-          await pool.query(
-            `
-            INSERT INTO user_missions (user_id, mission_id, progress_value, completed_at)
-            VALUES ($1, $2, $3, CASE WHEN $3 >= $4 THEN CURRENT_TIMESTAMP ELSE NULL END)
-            `,
-            [userId, m.id, progress, target]
-          );
-        } else {
-          const row = umRes.rows[0];
-          const alreadyCompleted = row.completed_at != null;
-          const newCompleted =
-            progress >= target && row.completed_at == null;
-
-          // eslint-disable-next-line no-await-in-loop
-          await pool.query(
-            `
-            UPDATE user_missions
-            SET progress_value = $3,
-                completed_at = CASE
-                  WHEN $4 = 1 AND completed_at IS NULL THEN CURRENT_TIMESTAMP
-                  ELSE completed_at
-                END
-            WHERE id = $1
-            `,
-            [row.id, progress, newCompleted ? 1 : 0]
-          );
-        }
       }
     }
   } catch (err) {
@@ -217,7 +170,7 @@ async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
   }
 }
 
-// Liste aktiver Sehenswürdigkeiten
+// 🔹 Liste aktiver Sehenswürdigkeiten
 router.get('/locations', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -237,7 +190,7 @@ router.get('/locations', authMiddleware, async (req, res) => {
   }
 });
 
-// Check-in
+// 🔹 Check-in
 router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
   const locationId = parseInt(req.params.id, 10);
   const { latitude, longitude } = req.body || {};
@@ -290,23 +243,23 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
       });
     }
 
-    // 🔹 Check-in speichern
+    // Check-in speichern
     await pool.query(
       'INSERT INTO checkins (user_id, location_id) VALUES ($1, $2)',
       [req.user.id, locationId]
     );
 
-    // 🔹 Gesamtanzahl Check-ins (= Punkte)
+    // Gesamtanzahl Check-ins (= Punkte)
     const totalCheckinsRes = await pool.query(
       'SELECT COUNT(*) AS cnt FROM checkins WHERE user_id = $1',
       [req.user.id]
     );
     const totalCheckins = parseInt(totalCheckinsRes.rows[0].cnt, 10);
 
-    // 🔹 Streak updaten
+    // Streak updaten
     const newStreak = await updateStreak(req.user.id);
 
-    // 🔹 Einfache Achievements
+    // Einfache Achievements
     const newlyUnlocked = [];
 
     if (totalCheckins === 1) {
@@ -331,7 +284,7 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
       newlyUnlocked.push('STREAK_7');
     }
 
-    // 🔹 Missions-Fortschritt aktualisieren
+    // Missions-Fortschritt aktualisieren
     await updateMissionsOnCheckin(req.user.id, totalCheckins, newStreak);
 
     res.json({

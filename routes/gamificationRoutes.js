@@ -15,16 +15,18 @@ router.get('/gamification/overview', authMiddleware, async (req, res) => {
         m.code,
         m.name,
         m.description,
-        m.goal_type,
-        m.goal_value,
+        m.target_type,
+        m.target_value,
+        m.is_repeatable,
         m.is_active,
-        COALESCE(um.current_value, 0)   AS current_value,
-        COALESCE(um.is_completed, FALSE) AS is_completed,
+        COALESCE(um.progress_value, 0) AS progress_value,
+        (um.completed_at IS NOT NULL) AS is_completed,
         um.completed_at
       FROM missions m
       LEFT JOIN user_missions um
         ON um.mission_id = m.id
        AND um.user_id = $1
+      WHERE m.is_active = TRUE
       ORDER BY m.id
       `,
       [req.user.id]

@@ -6,8 +6,8 @@ const authMiddleware = require('../middleware/authMiddleware');
 const router = express.Router();
 
 /**
- * Stellt sicher, dass alle benötigten Tabellen existieren (PostgreSQL).
- * Wird bei jedem Aufruf von /api/gamification/overview einmal ausgeführt.
+ * Stellt sicher, dass alle benötigten Tabellen existieren (PostgreSQL)
+ * UND dass user_missions einen Unique-Index auf (user_id, mission_id) hat.
  */
 async function ensureGamificationSchema() {
   // achievements
@@ -56,10 +56,26 @@ async function ensureGamificationSchema() {
       mission_id INTEGER NOT NULL,
       progress_value INTEGER NOT NULL DEFAULT 0,
       completed_at TIMESTAMP,
-      UNIQUE (user_id, mission_id),
       FOREIGN KEY (user_id) REFERENCES users(id),
       FOREIGN KEY (mission_id) REFERENCES missions(id)
     );
+  `);
+
+  // 🔹 WICHTIG: Unique-Index auf (user_id, mission_id), damit ON CONFLICT funktioniert
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = 'user_missions_user_id_mission_id_key'
+      ) THEN
+        CREATE UNIQUE INDEX user_missions_user_id_mission_id_key
+          ON user_missions (user_id, mission_id);
+      END IF;
+    END
+    $$;
   `);
 }
 
@@ -67,7 +83,6 @@ async function ensureGamificationSchema() {
  * Legt Standard-Achievements und -Missions an, falls sie noch nicht existieren.
  */
 async function seedGamificationDefaults() {
-  // Achievements
   await pool.query(`
     INSERT INTO achievements (code, name, description, icon)
     VALUES
@@ -79,7 +94,6 @@ async function seedGamificationDefaults() {
     ON CONFLICT (code) DO NOTHING;
   `);
 
-  // Missions
   await pool.query(`
     INSERT INTO missions (code, name, description, target_type, target_value)
     VALUES
@@ -99,11 +113,9 @@ router.get('/overview', authMiddleware, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // Tabellen sicherstellen + Default-Daten einspielen
     await ensureGamificationSchema();
     await seedGamificationDefaults();
 
-    // Missions + Fortschritt
     const missionsRes = await pool.query(
       `
       SELECT
@@ -125,7 +137,6 @@ router.get('/overview', authMiddleware, async (req, res) => {
       [userId]
     );
 
-    // Achievements des Users
     const achievementsRes = await pool.query(
       `
       SELECT

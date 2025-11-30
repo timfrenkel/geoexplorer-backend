@@ -22,7 +22,7 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// 🔹 Helper: Achievement vergeben, wenn es existiert
+// 🔹 Achievement vergeben, falls vorhanden
 async function awardAchievement(userId, code) {
   try {
     await pool.query(
@@ -45,53 +45,45 @@ async function awardAchievement(userId, code) {
   }
 }
 
-// 🔹 Helper: Streak updaten (basierend auf last_checkin_date)
+/**
+ * 🔹 Streak in der DB berechnen (nur über CURRENT_DATE)
+ * - last_checkin_date & checkin_streak_days liegen in users
+ * - Streak-Logik läuft direkt in PostgreSQL, nicht über JS-Dates
+ */
 async function updateStreak(userId) {
   try {
-    const res = await pool.query(
+    const result = await pool.query(
       `
-      SELECT last_checkin_date, checkin_streak_days
-      FROM users
+      WITH user_data AS (
+        SELECT
+          last_checkin_date::date AS last_date,
+          COALESCE(checkin_streak_days, 0) AS old_streak
+        FROM users
+        WHERE id = $1
+      ),
+      calc AS (
+        SELECT
+          CASE
+            WHEN last_date = CURRENT_DATE THEN old_streak
+            WHEN last_date = CURRENT_DATE - INTERVAL '1 day' THEN old_streak + 1
+            ELSE 1
+          END AS new_streak
+        FROM user_data
+      )
+      UPDATE users
+      SET
+        last_checkin_date = CURRENT_DATE,
+        checkin_streak_days = COALESCE((SELECT new_streak FROM calc), 1)
       WHERE id = $1
+      RETURNING checkin_streak_days;
       `,
       [userId]
     );
 
-    const now = new Date();
-    let newStreak = 1;
-
-    if (res.rowCount > 0) {
-      const row = res.rows[0];
-      const last = row.last_checkin_date
-        ? new Date(row.last_checkin_date)
-        : null;
-      const oldStreak = row.checkin_streak_days || 0;
-
-      if (last) {
-        const diffMs = now.getTime() - last.getTime();
-        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-        if (diffDays === 0) {
-          newStreak = oldStreak || 1;
-        } else if (diffDays === 1) {
-          newStreak = oldStreak + 1;
-        } else {
-          newStreak = 1;
-        }
-      }
+    if (result.rowCount > 0) {
+      return result.rows[0].checkin_streak_days;
     }
-
-    await pool.query(
-      `
-      UPDATE users
-      SET last_checkin_date = $2,
-          checkin_streak_days = $3
-      WHERE id = $1
-      `,
-      [userId, now, newStreak]
-    );
-
-    return newStreak;
+    return 1;
   } catch (err) {
     console.error('updateStreak error:', err.message);
     return null;
@@ -99,12 +91,12 @@ async function updateStreak(userId) {
 }
 
 /**
- * 🔹 Helper: Missions-Fortschritt nach Check-in updaten
- * Nutzt PostgreSQL-UPSERT (ON CONFLICT) auf (user_id, mission_id)
+ * 🔹 Missions-Fortschritt nach Check-in updaten
+ * Nutzt jetzt sicheren UPSERT mit dem Unique-Index aus gamificationRoutes
  */
 async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
   try {
-    // TOTAL_CHECKINS-Missions
+    // TOTAL_CHECKINS
     const totalMissionsRes = await pool.query(
       `
       SELECT id, target_value
@@ -134,7 +126,7 @@ async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
       );
     }
 
-    // STREAK_DAYS-Missions
+    // STREAK_DAYS
     if (streakDays != null) {
       const streakMissionsRes = await pool.query(
         `
@@ -170,7 +162,7 @@ async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
   }
 }
 
-// 🔹 Liste aktiver Sehenswürdigkeiten
+// 🔹 Liste aktiver Locations
 router.get('/locations', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -256,10 +248,10 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
     );
     const totalCheckins = parseInt(totalCheckinsRes.rows[0].cnt, 10);
 
-    // Streak updaten
+    // Streak updaten (über CURRENT_DATE)
     const newStreak = await updateStreak(req.user.id);
 
-    // Einfache Achievements
+    // Achievements
     const newlyUnlocked = [];
 
     if (totalCheckins === 1) {

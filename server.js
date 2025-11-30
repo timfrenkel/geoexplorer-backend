@@ -61,7 +61,7 @@ async function initDb() {
     'Friendships-Tabelle angelegt'
   );
   await runSqlFile(
-    '005_normalize_location_categories.sql',
+    '007_normalize_location_categories.sql',
     'Location-Kategorien vereinheitlicht'
   );
 }

@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS friendships (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  friend_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT NOW(),
+
+  UNIQUE(user_id, friend_id)
+);

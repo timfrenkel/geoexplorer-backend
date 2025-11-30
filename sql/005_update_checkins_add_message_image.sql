@@ -1,0 +1,5 @@
+ALTER TABLE checkins
+  ADD COLUMN IF NOT EXISTS message TEXT;
+
+ALTER TABLE checkins
+  ADD COLUMN IF NOT EXISTS image_url TEXT;

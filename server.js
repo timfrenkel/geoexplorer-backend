@@ -53,7 +53,7 @@ app.use('/api', feedRoutes);
 app.use('/api', friendsRoutes);
 app.use('/api', tripsRoutes);
 app.use('/api', gamificationRoutes);
-
+app.use('/api/gamification', gamificationRoutes);
 // Healthcheck
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });

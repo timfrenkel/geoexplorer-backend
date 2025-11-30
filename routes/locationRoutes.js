@@ -14,28 +14,98 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
   const dLon = toRad(lon2 - lon1);
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+// 🔹 Helper: Achievement vergeben, wenn es existiert
+async function awardAchievement(userId, code) {
+  try {
+    await pool.query(
+      `
+      INSERT INTO user_achievements (user_id, achievement_id)
+      SELECT $1, a.id
+      FROM achievements a
+      WHERE a.code = $2
+        AND NOT EXISTS (
+          SELECT 1
+          FROM user_achievements ua
+          WHERE ua.user_id = $1
+            AND ua.achievement_id = a.id
+        )
+      `,
+      [userId, code]
+    );
+  } catch (err) {
+    // Wenn Tabelle noch nicht existiert oder ähnliches -> nicht alles crashen lassen
+    console.error('awardAchievement error:', err.message);
+  }
+}
+
+// 🔹 Helper: Streak updaten (basierend auf last_checkin_date)
+async function updateStreak(userId) {
+  try {
+    const res = await pool.query(
+      `
+      SELECT last_checkin_date, checkin_streak_days
+      FROM users
+      WHERE id = $1
+      `,
+      [userId]
+    );
+
+    const now = new Date();
+    let newStreak = 1;
+
+    if (res.rowCount > 0) {
+      const row = res.rows[0];
+      const last = row.last_checkin_date
+        ? new Date(row.last_checkin_date)
+        : null;
+      const oldStreak = row.checkin_streak_days || 0;
+
+      if (last) {
+        const diffMs = now.getTime() - last.getTime();
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+        if (diffDays === 0) {
+          // Gleicher Tag -> Streak bleibt
+          newStreak = oldStreak || 1;
+        } else if (diffDays === 1) {
+          // Neuer Tag direkt nach letztem -> Streak + 1
+          newStreak = oldStreak + 1;
+        } else {
+          // Längere Pause -> Streak reset auf 1
+          newStreak = 1;
+        }
+      }
+    }
+
+    await pool.query(
+      `
+      UPDATE users
+      SET last_checkin_date = $2,
+          checkin_streak_days = $3
+      WHERE id = $1
+      `,
+      [userId, now, newStreak]
+    );
+
+    return newStreak;
+  } catch (err) {
+    console.error('updateStreak error:', err.message);
+    return null;
+  }
 }
 
 // Liste aktiver Sehenswürdigkeiten
 router.get('/locations', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT
-         id,
-         name,
-         description,
-         latitude,
-         longitude,
-         radius_m,
-         image_url,
-         category
+      `SELECT id, name, description, latitude, longitude, radius_m,
+              image_url, category
        FROM locations
        WHERE is_active = true
        ORDER BY id`
@@ -70,9 +140,9 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
     );
 
     if (locRes.rowCount === 0) {
-      return res
-        .status(404)
-        .json({ message: 'Sehenswürdigkeit nicht gefunden oder nicht aktiv.' });
+      return res.status(404).json({
+        message: 'Sehenswürdigkeit nicht gefunden oder nicht aktiv.'
+      });
     }
 
     const location = locRes.rows[0];
@@ -103,88 +173,53 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
       });
     }
 
-    // Check-in speichern
+    // 🔹 Check-in speichern
     await pool.query(
       'INSERT INTO checkins (user_id, location_id) VALUES ($1, $2)',
       [req.user.id, locationId]
     );
 
-    // Gesamtzahl Check-ins als Punkte
+    // 🔹 Gesamtanzahl Check-ins (= Punkte)
     const totalCheckinsRes = await pool.query(
       'SELECT COUNT(*) AS cnt FROM checkins WHERE user_id = $1',
       [req.user.id]
     );
     const totalCheckins = parseInt(totalCheckinsRes.rows[0].cnt, 10);
 
-    // Streak updaten
-    const streakRes = await pool.query(
-      `
-      UPDATE users
-      SET
-        last_checkin_date = CURRENT_DATE,
-        checkin_streak_days =
-          CASE
-            WHEN last_checkin_date IS NULL THEN 1
-            WHEN last_checkin_date = CURRENT_DATE THEN checkin_streak_days
-            WHEN last_checkin_date = CURRENT_DATE - INTERVAL '1 day'
-              THEN checkin_streak_days + 1
-            ELSE 1
-          END
-      WHERE id = $1
-      RETURNING checkin_streak_days
-      `,
-      [req.user.id]
-    );
+    // 🔹 Streak updaten
+    const newStreak = await updateStreak(req.user.id);
 
-    const streakDays = streakRes.rows[0]?.checkin_streak_days || 1;
+    // 🔹 Einfache Achievements (optional – nur, wenn in DB definiert)
+    const newlyUnlocked = [];
 
-    // Achievement "first_checkin" verleihen (falls noch nicht)
     if (totalCheckins === 1) {
-      try {
-        let achId;
-        const achRes = await pool.query(
-          'SELECT id FROM achievements WHERE code = $1',
-          ['first_checkin']
-        );
+      await awardAchievement(req.user.id, 'FIRST_CHECKIN');
+      newlyUnlocked.push('FIRST_CHECKIN');
+    }
+    if (totalCheckins === 5) {
+      await awardAchievement(req.user.id, 'CHECKINS_5');
+      newlyUnlocked.push('CHECKINS_5');
+    }
+    if (totalCheckins === 10) {
+      await awardAchievement(req.user.id, 'CHECKINS_10');
+      newlyUnlocked.push('CHECKINS_10');
+    }
 
-        if (achRes.rowCount === 0) {
-          const insertAch = await pool.query(
-            `
-            INSERT INTO achievements (code, name, description, icon)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id
-            `,
-            [
-              'first_checkin',
-              'Erster Check-in',
-              'Du hast deinen ersten Ort entdeckt!',
-              '🌍'
-            ]
-          );
-          achId = insertAch.rows[0].id;
-        } else {
-          achId = achRes.rows[0].id;
-        }
-
-        await pool.query(
-          `
-          INSERT INTO user_achievements (user_id, achievement_id)
-          VALUES ($1, $2)
-          ON CONFLICT (user_id, achievement_id) DO NOTHING
-          `,
-          [req.user.id, achId]
-        );
-      } catch (achErr) {
-        console.error('Achievement first_checkin error:', achErr);
-        // Kein Hard-Fail, Check-in bleibt gültig
-      }
+    if (newStreak === 3) {
+      await awardAchievement(req.user.id, 'STREAK_3');
+      newlyUnlocked.push('STREAK_3');
+    }
+    if (newStreak === 7) {
+      await awardAchievement(req.user.id, 'STREAK_7');
+      newlyUnlocked.push('STREAK_7');
     }
 
     res.json({
       message: `Erfolgreich bei "${location.name}" eingecheckt!`,
       distance,
       points: totalCheckins,
-      streakDays
+      streakDays: newStreak,
+      newAchievements: newlyUnlocked
     });
   } catch (err) {
     console.error('Check-in error:', err);

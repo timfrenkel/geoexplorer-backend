@@ -24,11 +24,10 @@ app.use(
     credentials: true
   })
 );
-
 app.use(express.json());
 app.use(morgan('dev'));
 
-// Helfer: eine SQL-Datei ausführen
+// Helfer: SQL-Datei ausführen
 async function runSqlFile(filename, label) {
   try {
     const sqlPath = path.join(__dirname, 'sql', filename);
@@ -44,7 +43,7 @@ async function runSqlFile(filename, label) {
     await pool.query(sql);
     console.log(`${label} ausgeführt (${filename}).`);
   } catch (err) {
-    // Beim zweiten Start können "Spalte existiert bereits" etc. vorkommen → nur Warnung
+    // ALTER TABLE / CREATE TABLE können beim zweiten Mal Fehler oder Warnungen werfen
     console.warn(`Warnung beim Ausführen von ${filename}:`, err.message);
   }
 }
@@ -61,11 +60,18 @@ async function initDb() {
     'Friendships-Tabelle angelegt'
   );
   await runSqlFile(
-    '007_normalize_location_categories.sql',
-    'Location-Kategorien vereinheitlicht'
+    '008_extend_users_and_checkins.sql',
+    'User-Profil- und Streak-Felder + Badge-Level'
+  );
+  await runSqlFile(
+    '009_create_trips.sql',
+    'Trips- und Trip-Locations-Tabellen angelegt'
+  );
+  await runSqlFile(
+    '010_create_gamification.sql',
+    'Missions- und Achievements-Tabellen angelegt'
   );
 }
-
 
 initDb().catch((err) => {
   console.error('Fehler bei DB-Init:', err);

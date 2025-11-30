@@ -353,7 +353,7 @@ router.get('/friends', authMiddleware, async (req, res) => {
   }
 });
 
-// 👤 Freund-Profil (öffentlich / mit Privacy)
+// 👤 Freund-/Benutzerprofil (öffentlich / mit Privacy + Punkte + Erfolge)
 router.get('/friends/:id/profile', authMiddleware, async (req, res) => {
   const otherId = parseInt(req.params.id, 10);
   const currentUserId = req.user.id;
@@ -398,9 +398,38 @@ router.get('/friends/:id/profile', authMiddleware, async (req, res) => {
     const rel = await getFriendRelation(currentUserId, otherId);
     const isFriend = rel.relation === 'friends';
 
+    // Profil-Zugriff (nur wenn öffentlich oder Freund oder man selbst)
     if (!isSelf && !other.is_profile_public && !isFriend) {
       return res.status(403).json({ message: 'Dieses Profil ist privat.' });
     }
+
+    // Punkte (Anzahl Check-ins)
+    const pointsRes = await pool.query(
+      'SELECT COUNT(*) AS cnt FROM checkins WHERE user_id = $1',
+      [otherId]
+    );
+    const points = parseInt(pointsRes.rows[0].cnt, 10) || 0;
+
+    // Erfolge (Achievements)
+    const achRes = await pool.query(
+      `
+      SELECT
+        a.id,
+        a.code,
+        a.name,
+        a.description,
+        a.icon,
+        ua.unlocked_at
+      FROM achievements a
+      JOIN user_achievements ua
+        ON ua.achievement_id = a.id
+      WHERE ua.user_id = $1
+      ORDER BY ua.unlocked_at DESC
+      `,
+      [otherId]
+    );
+
+    const achievements = achRes.rows;
 
     const canSeeFeed = isSelf || isFriend || other.is_feed_public;
 
@@ -450,6 +479,8 @@ router.get('/friends/:id/profile', authMiddleware, async (req, res) => {
       isFriend,
       isSelf,
       canSeeFeed,
+      points,
+      achievements,
       checkins
     });
   } catch (err) {

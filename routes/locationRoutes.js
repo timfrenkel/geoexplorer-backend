@@ -14,7 +14,8 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
   const dLon = toRad(lon2 - lon1);
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
       Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
@@ -39,7 +40,6 @@ async function awardAchievement(userId, code) {
       [userId, code]
     );
   } catch (err) {
-    // Wenn Tabelle noch nicht existiert oder ähnliches -> nicht alles crashen lassen
     console.error('awardAchievement error:', err.message);
   }
 }
@@ -71,13 +71,10 @@ async function updateStreak(userId) {
         const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
         if (diffDays === 0) {
-          // Gleicher Tag -> Streak bleibt
           newStreak = oldStreak || 1;
         } else if (diffDays === 1) {
-          // Neuer Tag direkt nach letztem -> Streak + 1
           newStreak = oldStreak + 1;
         } else {
-          // Längere Pause -> Streak reset auf 1
           newStreak = 1;
         }
       }
@@ -97,6 +94,126 @@ async function updateStreak(userId) {
   } catch (err) {
     console.error('updateStreak error:', err.message);
     return null;
+  }
+}
+
+// 🔹 Helper: Missions-Fortschritt nach Check-in updaten
+async function updateMissionsOnCheckin(userId, totalCheckins, streakDays) {
+  try {
+    // TOTAL_CHECKINS-Missions
+    const totalMissionsRes = await pool.query(
+      `
+      SELECT id, target_value
+      FROM missions
+      WHERE target_type = 'TOTAL_CHECKINS'
+      `
+    );
+
+    for (const m of totalMissionsRes.rows) {
+      const target = m.target_value || 0;
+      const progress = Math.min(totalCheckins, target);
+
+      // Upsert user_missions
+      // 1) gibt es schon einen Eintrag?
+      // eslint-disable-next-line no-await-in-loop
+      const umRes = await pool.query(
+        `
+        SELECT id, progress_value, completed_at
+        FROM user_missions
+        WHERE user_id = $1 AND mission_id = $2
+        `,
+        [userId, m.id]
+      );
+
+      if (umRes.rowCount === 0) {
+        // neu anlegen
+        // eslint-disable-next-line no-await-in-loop
+        await pool.query(
+          `
+          INSERT INTO user_missions (user_id, mission_id, progress_value, completed_at)
+          VALUES ($1, $2, $3, CASE WHEN $3 >= $4 THEN CURRENT_TIMESTAMP ELSE NULL END)
+          `,
+          [userId, m.id, progress, target]
+        );
+      } else {
+        const row = umRes.rows[0];
+        const alreadyCompleted = row.completed_at != null;
+        const newCompleted =
+          progress >= target && row.completed_at == null;
+
+        // eslint-disable-next-line no-await-in-loop
+        await pool.query(
+          `
+          UPDATE user_missions
+          SET progress_value = $3,
+              completed_at = CASE
+                WHEN $4 = 1 AND completed_at IS NULL THEN CURRENT_TIMESTAMP
+                ELSE completed_at
+              END
+          WHERE id = $1
+          `,
+          [row.id, userId, progress, newCompleted ? 1 : 0]
+        );
+      }
+    }
+
+    // STREAK_DAYS-Missions
+    if (streakDays != null) {
+      const streakMissionsRes = await pool.query(
+        `
+        SELECT id, target_value
+        FROM missions
+        WHERE target_type = 'STREAK_DAYS'
+        `
+      );
+
+      for (const m of streakMissionsRes.rows) {
+        const target = m.target_value || 0;
+        const progress = Math.min(streakDays, target);
+
+        // eslint-disable-next-line no-await-in-loop
+        const umRes = await pool.query(
+          `
+          SELECT id, progress_value, completed_at
+          FROM user_missions
+          WHERE user_id = $1 AND mission_id = $2
+          `,
+          [userId, m.id]
+        );
+
+        if (umRes.rowCount === 0) {
+          // eslint-disable-next-line no-await-in-loop
+          await pool.query(
+            `
+            INSERT INTO user_missions (user_id, mission_id, progress_value, completed_at)
+            VALUES ($1, $2, $3, CASE WHEN $3 >= $4 THEN CURRENT_TIMESTAMP ELSE NULL END)
+            `,
+            [userId, m.id, progress, target]
+          );
+        } else {
+          const row = umRes.rows[0];
+          const alreadyCompleted = row.completed_at != null;
+          const newCompleted =
+            progress >= target && row.completed_at == null;
+
+          // eslint-disable-next-line no-await-in-loop
+          await pool.query(
+            `
+            UPDATE user_missions
+            SET progress_value = $3,
+                completed_at = CASE
+                  WHEN $4 = 1 AND completed_at IS NULL THEN CURRENT_TIMESTAMP
+                  ELSE completed_at
+                END
+            WHERE id = $1
+            `,
+            [row.id, progress, newCompleted ? 1 : 0]
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error('updateMissionsOnCheckin error:', err.message);
   }
 }
 
@@ -189,7 +306,7 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
     // 🔹 Streak updaten
     const newStreak = await updateStreak(req.user.id);
 
-    // 🔹 Einfache Achievements (optional – nur, wenn in DB definiert)
+    // 🔹 Einfache Achievements
     const newlyUnlocked = [];
 
     if (totalCheckins === 1) {
@@ -213,6 +330,9 @@ router.post('/locations/:id/checkin', authMiddleware, async (req, res) => {
       await awardAchievement(req.user.id, 'STREAK_7');
       newlyUnlocked.push('STREAK_7');
     }
+
+    // 🔹 Missions-Fortschritt aktualisieren
+    await updateMissionsOnCheckin(req.user.id, totalCheckins, newStreak);
 
     res.json({
       message: `Erfolgreich bei "${location.name}" eingecheckt!`,

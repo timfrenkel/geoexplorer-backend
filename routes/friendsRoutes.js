@@ -79,7 +79,6 @@ router.get('/friends/search', authMiddleware, async (req, res) => {
 
     const enriched = [];
     for (const u of users) {
-      // nacheinander, ist hier ok
       // eslint-disable-next-line no-await-in-loop
       const rel = await getFriendRelation(req.user.id, u.id);
       enriched.push({
@@ -116,7 +115,6 @@ router.post('/friends/requests', authMiddleware, async (req, res) => {
       return res.status(404).json({ message: 'Benutzer nicht gefunden.' });
     }
 
-    // Gibt es schon eine Beziehung?
     const relRes = await pool.query(
       `
       SELECT id, user_id, friend_id, status
@@ -173,7 +171,7 @@ router.post('/friends/requests', authMiddleware, async (req, res) => {
   }
 });
 
-// 📬 Ausstehende Anfragen (eingehend & ausgehend)
+// 📬 Ausstehende Anfragen (incoming & outgoing)
 router.get('/friends/requests', authMiddleware, async (req, res) => {
   try {
     const incomingRes = await pool.query(
@@ -304,7 +302,6 @@ router.post('/friends/requests/:id/reject', authMiddleware, async (req, res) => 
 
     const row = reqRes.rows[0];
 
-    // Nur Sender oder Empfänger darf ändern
     if (row.user_id !== req.user.id && row.friend_id !== req.user.id) {
       return res
         .status(403)
@@ -353,6 +350,111 @@ router.get('/friends', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Friend list error:', err);
     res.status(500).json({ message: 'Fehler beim Laden.' });
+  }
+});
+
+// 👤 Freund-Profil (öffentlich / mit Privacy)
+router.get('/friends/:id/profile', authMiddleware, async (req, res) => {
+  const otherId = parseInt(req.params.id, 10);
+  const currentUserId = req.user.id;
+
+  if (!otherId) {
+    return res.status(400).json({ message: 'Ungültige Benutzer-ID.' });
+  }
+
+  try {
+    const userRes = await pool.query(
+      `
+      SELECT
+        id,
+        username,
+        email,
+        profile_image_url,
+        banner_image_url,
+        bio,
+        mood_emoji,
+        home_city,
+        home_country,
+        custom_status,
+        is_profile_public,
+        is_feed_public,
+        created_at,
+        last_checkin_date,
+        checkin_streak_days
+      FROM users
+      WHERE id = $1
+      `,
+      [otherId]
+    );
+
+    if (userRes.rowCount === 0) {
+      return res.status(404).json({ message: 'Benutzer nicht gefunden.' });
+    }
+
+    const other = userRes.rows[0];
+
+    const isSelf = other.id === currentUserId;
+
+    const rel = await getFriendRelation(currentUserId, otherId);
+    const isFriend = rel.relation === 'friends';
+
+    if (!isSelf && !other.is_profile_public && !isFriend) {
+      return res.status(403).json({ message: 'Dieses Profil ist privat.' });
+    }
+
+    const canSeeFeed = isSelf || isFriend || other.is_feed_public;
+
+    let checkins = [];
+    if (canSeeFeed) {
+      const checksRes = await pool.query(
+        `
+        SELECT
+          c.id,
+          c.created_at,
+          c.message,
+          c.image_url,
+          l.id AS location_id,
+          l.name AS location_name,
+          l.image_url AS location_image,
+          l.category AS location_category
+        FROM checkins c
+        JOIN locations l ON l.id = c.location_id
+        WHERE c.user_id = $1
+        ORDER BY c.created_at DESC
+        LIMIT 30
+        `,
+        [otherId]
+      );
+      checkins = checksRes.rows;
+    }
+
+    res.json({
+      user: {
+        id: other.id,
+        username: other.username,
+        profileImageUrl: other.profile_image_url,
+        bannerImageUrl: other.banner_image_url,
+        bio: other.bio,
+        moodEmoji: other.mood_emoji,
+        homeCity: other.home_city,
+        homeCountry: other.home_country,
+        customStatus: other.custom_status,
+        isProfilePublic: other.is_profile_public,
+        isFeedPublic: other.is_feed_public,
+        createdAt: other.created_at,
+        lastCheckinDate: other.last_checkin_date,
+        checkinStreakDays: other.checkin_streak_days
+      },
+      relation: rel.relation,
+      requestId: rel.requestId,
+      isFriend,
+      isSelf,
+      canSeeFeed,
+      checkins
+    });
+  } catch (err) {
+    console.error('Friend profile error:', err);
+    res.status(500).json({ message: 'Fehler beim Laden des Profils.' });
   }
 });
 

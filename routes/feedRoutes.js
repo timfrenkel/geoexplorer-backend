@@ -37,7 +37,7 @@ router.get('/feed', authMiddleware, async (req, res) => {
           -- eigene Check-ins
           c.user_id = $1
           OR
-          -- Check-ins von Freunden (beide Richtungen in friendships)
+          -- Check-ins von Freunden
           c.user_id IN (
             SELECT DISTINCT
               CASE
